@@ -1,13 +1,26 @@
 <!DOCTYPE html>
-<html>
+<html lang="ru">
 
 <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>СпортОбъекты</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <style>
+        body {
+            font-family: sans-serif;
+            margin: 0;
+        }
+
         #map {
-            height: 400px;
+            height: 560px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
         }
 
         button {
@@ -29,10 +42,23 @@
             padding: 5px;
         }
 
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 20px;
+        #status {
+            margin: 8px 5px;
+            color: #555;
+        }
+
+        .legend span {
+            margin-right: 14px;
+            white-space: nowrap;
+        }
+
+        .dot {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 4px;
+            vertical-align: middle;
         }
     </style>
 </head>
@@ -40,17 +66,21 @@
 <body>
     <div class="container">
         <h2>Спортивные объекты</h2>
+        <div>
+            <button onclick="loadOsm()">🔄 Показать спортобъекты в этой области</button>
+            <span id="status">Загрузка…</span>
+        </div>
         <div id="map"></div>
+        <div class="legend" id="legend" style="margin:10px 0;"></div>
 
-        <div style="margin: 20px 0;">
+        <h3>Мои объекты (из базы)</h3>
+        <div style="margin: 10px 0;">
             <input id="name" placeholder="Название">
             <input id="type" placeholder="Тип">
             <input id="lat" placeholder="Широта">
             <input id="lon" placeholder="Долгота">
             <button onclick="addObjects()" style="background-color: #4CAF50; color: white;">➕ Добавить</button>
         </div>
-
-        <h3>Список объектов</h3>
         <table border="1">
             <thead>
                 <tr>
@@ -66,40 +96,173 @@
     </div>
 
     <script>
-        var map = L.map('map').setView([55.75, 37.62], 12);
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
-        var markers = L.layerGroup().addTo(map);
+        var map = L.map('map').setView([55.75, 37.62], 14);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '© участники OpenStreetMap'
+        }).addTo(map);
 
+        var osmLayer = L.layerGroup().addTo(map);   // объекты с карты (OSM)
+        var markers = L.layerGroup().addTo(map);    // объекты из своей базы
+
+        function esc(s) {
+            return String(s).replace(/[&<>"']/g, function (c) {
+                return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+            });
+        }
+
+        // Что считаем спортивным объектом и как подписываем
+        var LEISURE = {
+            pitch: { ru: 'Спортплощадка', color: '#2e9e44' },
+            sports_centre: { ru: 'Спортцентр', color: '#1d6fd1' },
+            stadium: { ru: 'Стадион', color: '#d12f2f' },
+            fitness_centre: { ru: 'Фитнес-центр', color: '#8e44ad' },
+            swimming_pool: { ru: 'Бассейн', color: '#17a2b8' },
+            track: { ru: 'Беговая дорожка', color: '#e67e22' },
+            ice_rink: { ru: 'Каток', color: '#5dade2' },
+            golf_course: { ru: 'Гольф', color: '#6c8f1e' },
+            fitness_station: { ru: 'Уличные тренажёры', color: '#c0392b' }
+        };
+        var OTHER = { ru: 'Спортивный объект', color: '#555555' };
+
+        var SPORT_RU = {
+            soccer: 'футбол', football: 'футбол', basketball: 'баскетбол', tennis: 'теннис',
+            volleyball: 'волейбол', swimming: 'плавание', running: 'бег', athletics: 'лёгкая атлетика',
+            ice_hockey: 'хоккей', hockey: 'хоккей', table_tennis: 'настольный теннис',
+            skateboard: 'скейтбординг', gymnastics: 'гимнастика', boxing: 'бокс',
+            fitness: 'фитнес', yoga: 'йога', badminton: 'бадминтон', handball: 'гандбол',
+            climbing: 'скалолазание', golf: 'гольф', multi: 'разные виды спорта',
+            skiing: 'лыжи', cycling: 'велоспорт', martial_arts: 'единоборства'
+        };
+
+        function sportsText(tags) {
+            if (!tags.sport) return '';
+            return tags.sport.split(';').map(function (s) {
+                s = s.trim();
+                return SPORT_RU[s] || s;
+            }).join(', ');
+        }
+
+        // Легенда
+        (function () {
+            var html = '';
+            for (var k in LEISURE) {
+                html += '<span><i class="dot" style="background:' + LEISURE[k].color + '"></i>' + LEISURE[k].ru + '</span>';
+            }
+            html += '<span><i class="dot" style="background:' + OTHER.color + '"></i>Другое</span>';
+            document.getElementById('legend').innerHTML = html;
+        })();
+
+        var MIN_ZOOM = 13;
+        var LIMIT = 500;
+        var osmAbort = null;
+        var osmTimer = null;
+
+        async function loadOsm() {
+            var status = document.getElementById('status');
+
+            if (map.getZoom() < MIN_ZOOM) {
+                status.textContent = 'Приблизьте карту (масштаб ' + MIN_ZOOM + ' и больше), чтобы загрузить спортобъекты';
+                return;
+            }
+
+            var b = map.getBounds();
+            var bbox = [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()].join(',');
+            var leisureRe = Object.keys(LEISURE).join('|');
+            var query =
+                '[out:json][timeout:25];(' +
+                'nwr["leisure"~"^(' + leisureRe + ')$"](' + bbox + ');' +
+                'nwr["sport"](' + bbox + ');' +
+                ');out center ' + LIMIT + ';';
+
+            if (osmAbort) osmAbort.abort();
+            osmAbort = new AbortController();
+            status.textContent = 'Ищу спортобъекты на карте…';
+
+            try {
+                var res = await fetch('https://overpass-api.de/api/interpreter', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: 'data=' + encodeURIComponent(query),
+                    signal: osmAbort.signal
+                });
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                var data = await res.json();
+
+                osmLayer.clearLayers();
+                var count = 0;
+
+                data.elements.forEach(function (el) {
+                    var lat = el.lat !== undefined ? el.lat : (el.center && el.center.lat);
+                    var lon = el.lon !== undefined ? el.lon : (el.center && el.center.lon);
+                    if (lat === undefined || lon === undefined) return;
+
+                    var tags = el.tags || {};
+                    var kind = LEISURE[tags.leisure] || OTHER;
+                    var title = tags.name || tags['name:ru'] || kind.ru;
+                    var sports = sportsText(tags);
+
+                    var html = '<b>' + esc(title) + '</b><br>' + esc(kind.ru);
+                    if (sports) html += '<br>Спорт: ' + esc(sports);
+                    if (tags.opening_hours) html += '<br>Часы работы: ' + esc(tags.opening_hours);
+                    if (tags.website) html += '<br><a href="' + esc(tags.website) + '" target="_blank" rel="noopener">сайт</a>';
+
+                    L.circleMarker([lat, lon], {
+                        radius: 8,
+                        color: '#ffffff',
+                        weight: 2,
+                        fillColor: kind.color,
+                        fillOpacity: 0.95
+                    }).bindPopup(html).addTo(osmLayer);
+                    count++;
+                });
+
+                status.textContent = 'Найдено на карте: ' + count +
+                    (data.elements.length >= LIMIT ? ' (показаны первые ' + LIMIT + ', приблизьте карту)' : '');
+            } catch (error) {
+                if (error.name === 'AbortError') return;
+                console.error('Ошибка Overpass:', error);
+                status.textContent = 'Не удалось загрузить объекты с карты (' + error.message + '). Попробуйте ещё раз.';
+            }
+        }
+
+        // Автообновление при сдвиге/масштабировании карты
+        map.on('moveend', function () {
+            clearTimeout(osmTimer);
+            osmTimer = setTimeout(loadOsm, 700);
+        });
+
+        // ---- Свои объекты из базы (как было раньше) ----
         async function loadData() {
             try {
-                let res = await fetch('/api/objects');
-                let objects = await res.json();
+                var res = await fetch('/api/objects');
+                var objects = await res.json();
 
                 markers.clearLayers();
-                let html = '';
+                var html = '';
 
-                for (let o of objects) {
-                    let m = L.marker([o.lat, o.lon]).addTo(markers);
-                    m.bindPopup(o.name + '<br>' + o.type + '<br><button onclick="deleteObject(' + o.id + ')">Удалить</button>');
+                for (var o of objects) {
+                    var m = L.marker([o.lat, o.lon]).addTo(markers);
+                    m.bindPopup(esc(o.name) + '<br>' + esc(o.type) + '<br><button onclick="deleteObject(' + o.id + ')">Удалить</button>');
 
                     html += '<tr>' +
-                        '<td>' + o.name + '</td>' +
-                        '<td>' + o.type + '</td>' +
+                        '<td>' + esc(o.name) + '</td>' +
+                        '<td>' + esc(o.type) + '</td>' +
                         '<td>' + o.lat + '</td>' +
                         '<td>' + o.lon + '</td>' +
                         '<td><button class="del" onclick="deleteObject(' + o.id + ')">🗑 Удалить</button></td>' +
                         '</tr>';
                 }
 
-                document.getElementById('list').innerHTML = html || '<tr><td colspan="5">Нет объектов</td><tr>';
+                document.getElementById('list').innerHTML = html || '<tr><td colspan="5">Нет объектов</td></tr>';
             } catch (error) {
                 console.error('Ошибка:', error);
-                document.getElementById('list').innerHTML = '<tr><td colspan="5">Ошибка загрузки</td><tr>';
+                document.getElementById('list').innerHTML = '<tr><td colspan="5">База недоступна (откройте страницу через сервер: http://127.0.0.1:8000/)</td></tr>';
             }
         }
 
         async function addObjects() {
-            let data = {
+            var data = {
                 name: document.getElementById('name').value,
                 type: document.getElementById('type').value,
                 lat: parseFloat(document.getElementById('lat').value),
@@ -142,6 +305,7 @@
         }
 
         loadData();
+        loadOsm();
     </script>
 </body>
 
