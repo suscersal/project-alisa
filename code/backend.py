@@ -1,3 +1,4 @@
+from fastapi.responses import FileResponse
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
@@ -19,22 +20,29 @@ app.add_middleware(
 )
 
 # Модель данных для объекта
+
+
 class SportObject(BaseModel):
     name: str
     type: str
     lat: float
     lon: float
 
+
 class SportObjectDB(SportObject):
     id: int
 
 # Подключение к БД
+
+
 def get_db():
     conn = sqlite3.connect('sports.db')
     conn.row_factory = sqlite3.Row
     return conn
 
 # Создаём таблицу при старте
+
+
 def init_db():
     conn = get_db()
     conn.execute('''
@@ -49,9 +57,15 @@ def init_db():
     conn.commit()
     conn.close()
 
+
 init_db()
 
+
+@app.get("/")
+async def root():
+    return FileResponse("index.html")
 # --- API endpoints ---
+
 
 @app.get("/api/objects", response_model=List[SportObjectDB])
 async def get_objects():
@@ -62,20 +76,20 @@ async def get_objects():
     conn.close()
     return [dict(obj) for obj in objects]
 
+
 @app.post("/api/objects/")
 async def add_object(obj: SportObject):
     """Добавить новый объект"""
     conn = get_db()
     cursor = conn.execute(
         'INSERT INTO objects (name, type, lat, lon) VALUES (?, ?, ?, ?)',
-        (obj.name
-, obj.type, obj.lat
-, obj.lon)
+        (obj.name, obj.type, obj.lat, obj.lon)
     )
     conn.commit()
     new_id = cursor.lastrowid
     conn.close()
     return {"id": new_id, "message": "Объект добавлен"}
+
 
 @app.delete("/api/objects/{object_id}")
 async def delete_object(object_id: int):
@@ -85,10 +99,10 @@ async def delete_object(object_id: int):
     conn.commit()
     deleted = cursor.rowcount
     conn.close()
-    
+
     if deleted == 0:
         raise HTTPException(status_code=404, detail="Объект не найден")
-    
+
     return {"message": "Объект удалён"}
 
 # Запуск сервера (для прямого запуска файла)
