@@ -5,16 +5,11 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>СпортОбъекты</title>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://api-maps.yandex.ru/2.1/?lang=ru_RU"></script>
     <style>
         body {
             font-family: sans-serif;
             margin: 0;
-        }
-
-        #map {
-            height: 560px;
         }
 
         .container {
@@ -29,6 +24,11 @@
             padding: 5px 15px;
         }
 
+        input {
+            margin: 5px;
+            padding: 5px;
+        }
+
         .del {
             background-color: #ff4444;
             color: white;
@@ -37,9 +37,18 @@
             cursor: pointer;
         }
 
-        input {
-            margin: 5px;
-            padding: 5px;
+        .link {
+            background: none;
+            border: none;
+            padding: 0;
+            margin: 0;
+            color: #1d6fd1;
+            font-size: inherit;
+            text-align: left;
+        }
+
+        .link:hover {
+            text-decoration: underline;
         }
 
         #status {
@@ -60,6 +69,71 @@
             margin-right: 4px;
             vertical-align: middle;
         }
+
+        .map-wrap {
+            position: relative;
+        }
+
+        #map {
+            height: 560px;
+        }
+
+        /* карточка с информацией по клику на точку */
+        .card {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            width: 300px;
+            max-width: calc(100% - 20px);
+            background: #fff;
+            z-index: 1000;
+            border-radius: 10px;
+            box-shadow: 0 2px 14px rgba(0, 0, 0, .3);
+            padding: 16px;
+        }
+
+        .card[hidden] {
+            display: none;
+        }
+
+        .card h3 {
+            margin: 0 28px 4px 0;
+            word-break: break-word;
+        }
+
+        .card .muted {
+            color: #6b7280;
+            font-size: 13px;
+        }
+
+        .card .x {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            margin: 0;
+            width: 28px;
+            height: 28px;
+            padding: 0;
+            border: none;
+            border-radius: 50%;
+            background: #f1f3f6;
+            font-size: 18px;
+            line-height: 1;
+        }
+
+        .card .r {
+            margin-top: 10px;
+            font-size: 14px;
+            word-break: break-word;
+        }
+
+        .card a {
+            color: #1d6fd1;
+        }
+
+        .card .del {
+            margin: 14px 0 0;
+        }
     </style>
 </head>
 
@@ -70,7 +144,10 @@
             <button onclick="loadOsm()">🔄 Показать спортобъекты в этой области</button>
             <span id="status">Загрузка…</span>
         </div>
-        <div id="map"></div>
+        <div class="map-wrap">
+            <div id="map"></div>
+            <div id="card" class="card" hidden></div>
+        </div>
         <div class="legend" id="legend" style="margin:10px 0;"></div>
 
         <h3>Мои объекты (из базы)</h3>
@@ -96,22 +173,68 @@
     </div>
 
     <script>
-        var map = L.map('map').setView([55.75, 37.62], 14);
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            maxZoom: 19,
-            attribution: '© участники OpenStreetMap'
-        }).addTo(map);
-
-        var osmLayer = L.layerGroup().addTo(map);   // объекты с карты (OSM)
-        var markers = L.layerGroup().addTo(map);    // объекты из своей базы
+        var map = null, osmLayer = null, markers = null, mapReady = false;
+        var allObjects = [];
 
         function esc(s) {
-            return String(s).replace(/[&<>"']/g, function (c) {
+            return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
                 return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
             });
         }
 
-        // Что считаем спортивным объектом и как подписываем
+        async function api(url, opts) {
+            var res = await fetch(url, opts);
+            var data = null;
+            try { data = await res.json(); } catch (e) { }
+            if (!res.ok) {
+                var d = data && data.detail;
+                throw new Error(typeof d === 'string' ? d : 'Ошибка запроса (' + res.status + ')');
+            }
+            return data;
+        }
+
+        function safeUrl(u) {
+            u = String(u || '').trim();
+            if (!u) return '';
+            if (/^https?:\/\//i.test(u)) return u;
+            return /^[\w.-]+\.[a-z]{2,}(\/|$)/i.test(u) ? 'https://' + u : '';
+        }
+
+        // ================= Карточка по клику на точку =================
+        function row(label, html) {
+            return '<div class="r"><span class="muted">' + label + ':</span> ' + html + '</div>';
+        }
+
+        function closeCard() { document.getElementById('card').hidden = true; }
+
+        function showCard(html) {
+            var c = document.getElementById('card');
+            c.innerHTML = '<button class="x" onclick="closeCard()" title="Закрыть">×</button>' + html;
+            c.hidden = false;
+        }
+
+        function openOwn(id) {
+            var o = allObjects.find(function (x) { return x.id === id; });
+            if (!o) return;
+            showCard('<h3>' + esc(o.name) + '</h3><div class="muted">' + esc(o.type) + '</div>' +
+                row('Широта', o.lat) + row('Долгота', o.lon) +
+                '<button class="del" onclick="deleteObject(' + o.id + ')">🗑 Удалить</button>');
+            if (mapReady) map.setCenter([o.lat, o.lon], Math.max(map.getZoom(), 15), { duration: 300 });
+        }
+
+        function openOsm(x) {
+            var h = '<h3>' + esc(x.title) + '</h3><div class="muted"><i class="dot" style="background:' + esc(x.color) + '"></i>' + esc(x.kind) + '</div>';
+            if (x.sports) h += row('Спорт', esc(x.sports));
+            if (x.address) h += row('Адрес', esc(x.address));
+            if (x.hours) h += row('Часы работы', esc(x.hours));
+            if (x.phone) h += row('Телефон', esc(x.phone));
+            var url = safeUrl(x.website);
+            if (url) h += row('Сайт', '<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + esc(x.website) + '</a>');
+            h += row('Координаты', x.lat.toFixed(5) + ', ' + x.lon.toFixed(5));
+            showCard(h);
+        }
+
+        // ================= Спортобъекты из OpenStreetMap =================
         var LEISURE = {
             pitch: { ru: 'Спортплощадка', color: '#2e9e44' },
             sports_centre: { ru: 'Спортцентр', color: '#1d6fd1' },
@@ -124,7 +247,6 @@
             fitness_station: { ru: 'Уличные тренажёры', color: '#c0392b' }
         };
         var OTHER = { ru: 'Спортивный объект', color: '#555555' };
-
         var SPORT_RU = {
             soccer: 'футбол', football: 'футбол', basketball: 'баскетбол', tennis: 'теннис',
             volleyball: 'волейбол', swimming: 'плавание', running: 'бег', athletics: 'лёгкая атлетика',
@@ -134,43 +256,69 @@
             climbing: 'скалолазание', golf: 'гольф', multi: 'разные виды спорта',
             skiing: 'лыжи', cycling: 'велоспорт', martial_arts: 'единоборства'
         };
-
         function sportsText(tags) {
             if (!tags.sport) return '';
-            return tags.sport.split(';').map(function (s) {
-                s = s.trim();
-                return SPORT_RU[s] || s;
-            }).join(', ');
+            return tags.sport.split(';').map(function (s) { s = s.trim(); return SPORT_RU[s] || s; }).join(', ');
         }
 
-        // Легенда
         (function () {
             var html = '';
             for (var k in LEISURE) {
                 html += '<span><i class="dot" style="background:' + LEISURE[k].color + '"></i>' + LEISURE[k].ru + '</span>';
             }
             html += '<span><i class="dot" style="background:' + OTHER.color + '"></i>Другое</span>';
+            html += '<span><i class="dot" style="background:#1e98ff"></i>Мои объекты</span>';
             document.getElementById('legend').innerHTML = html;
         })();
 
-        var MIN_ZOOM = 13;
-        var LIMIT = 500;
-        var osmAbort = null;
-        var osmTimer = null;
+        var MIN_ZOOM = 14, LIMIT = 300, osmAbort = null, osmTimer = null;
+
+        var OVERPASS = [
+            'https://overpass-api.de/api/interpreter',
+            'https://overpass.kumi.systems/api/interpreter',
+            'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
+            'https://overpass.private.coffee/api/interpreter',
+            'https://overpass.openstreetmap.fr/api/interpreter'
+        ];
+
+        async function overpassFetch(query, signal) {
+            var lastError;
+            for (var i = 0; i < OVERPASS.length; i++) {
+                var ctrl = new AbortController();
+                var timer = setTimeout(function () { ctrl.abort(); }, 12000);
+                signal.addEventListener('abort', function () { ctrl.abort(); });
+                try {
+                    var res = await fetch(OVERPASS[i], {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: 'data=' + encodeURIComponent(query),
+                        signal: ctrl.signal
+                    });
+                    if (!res.ok) throw new Error('HTTP ' + res.status);
+                    return await res.json();
+                } catch (e) {
+                    if (signal.aborted) throw e;
+                    lastError = e.name === 'AbortError' ? new Error('таймаут') : e;
+                } finally {
+                    clearTimeout(timer);
+                }
+            }
+            throw lastError;
+        }
 
         async function loadOsm() {
             var status = document.getElementById('status');
+            if (!mapReady) return;
 
             if (map.getZoom() < MIN_ZOOM) {
                 status.textContent = 'Приблизьте карту (масштаб ' + MIN_ZOOM + ' и больше), чтобы загрузить спортобъекты';
                 return;
             }
 
-            var b = map.getBounds();
-            var bbox = [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()].join(',');
+            var b = map.getBounds();   // [[юг, запад], [север, восток]]
+            var bbox = [b[0][0], b[0][1], b[1][0], b[1][1]].join(',');
             var leisureRe = Object.keys(LEISURE).join('|');
-            var query =
-                '[out:json][timeout:25];(' +
+            var query = '[out:json][timeout:15];(' +
                 'nwr["leisure"~"^(' + leisureRe + ')$"](' + bbox + ');' +
                 'nwr["sport"](' + bbox + ');' +
                 ');out center ' + LIMIT + ';';
@@ -180,16 +328,9 @@
             status.textContent = 'Ищу спортобъекты на карте…';
 
             try {
-                var res = await fetch('https://overpass-api.de/api/interpreter', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                    body: 'data=' + encodeURIComponent(query),
-                    signal: osmAbort.signal
-                });
-                if (!res.ok) throw new Error('HTTP ' + res.status);
-                var data = await res.json();
+                var data = await overpassFetch(query, osmAbort.signal);
 
-                osmLayer.clearLayers();
+                osmLayer.removeAll();
                 var count = 0;
 
                 data.elements.forEach(function (el) {
@@ -200,20 +341,21 @@
                     var tags = el.tags || {};
                     var kind = LEISURE[tags.leisure] || OTHER;
                     var title = tags.name || tags['name:ru'] || kind.ru;
-                    var sports = sportsText(tags);
+                    var street = tags['addr:street'] ? tags['addr:street'] + (tags['addr:housenumber'] ? ', ' + tags['addr:housenumber'] : '') : '';
+                    var info = {
+                        title: title, kind: kind.ru, color: kind.color,
+                        sports: sportsText(tags), lat: lat, lon: lon,
+                        address: [tags['addr:city'], street].filter(Boolean).join(', '),
+                        phone: tags.phone || tags['contact:phone'] || '',
+                        hours: tags.opening_hours || '',
+                        website: tags.website || tags['contact:website'] || ''
+                    };
 
-                    var html = '<b>' + esc(title) + '</b><br>' + esc(kind.ru);
-                    if (sports) html += '<br>Спорт: ' + esc(sports);
-                    if (tags.opening_hours) html += '<br>Часы работы: ' + esc(tags.opening_hours);
-                    if (tags.website) html += '<br><a href="' + esc(tags.website) + '" target="_blank" rel="noopener">сайт</a>';
-
-                    L.circleMarker([lat, lon], {
-                        radius: 8,
-                        color: '#ffffff',
-                        weight: 2,
-                        fillColor: kind.color,
-                        fillOpacity: 0.95
-                    }).bindPopup(html).addTo(osmLayer);
+                    var pm = new ymaps.Placemark([lat, lon],
+                        { hintContent: title },
+                        { preset: 'islands#circleDotIcon', iconColor: kind.color, hasBalloon: false });
+                    pm.events.add('click', function () { openOsm(info); });
+                    osmLayer.add(pm);
                     count++;
                 });
 
@@ -226,47 +368,44 @@
             }
         }
 
-        // Автообновление при сдвиге/масштабировании карты
-        map.on('moveend', function () {
-            clearTimeout(osmTimer);
-            osmTimer = setTimeout(loadOsm, 700);
-        });
-
-        // ---- Свои объекты из базы (как было раньше) ----
+        // ================= Мои объекты из базы =================
         async function loadData() {
             try {
-                var res = await fetch('/api/objects');
-                var objects = await res.json();
-
-                markers.clearLayers();
+                allObjects = await api('/api/objects');
+                if (mapReady) markers.removeAll();
                 var html = '';
 
-                for (var o of objects) {
-                    var m = L.marker([o.lat, o.lon]).addTo(markers);
-                    m.bindPopup(esc(o.name) + '<br>' + esc(o.type) + '<br><button onclick="deleteObject(' + o.id + ')">Удалить</button>');
-
+                allObjects.forEach(function (o) {
+                    if (mapReady) {
+                        var pm = new ymaps.Placemark([o.lat, o.lon],
+                            { hintContent: o.name },
+                            { preset: 'islands#blueSportIcon', hasBalloon: false });
+                        pm.events.add('click', function () { openOwn(o.id); });
+                        markers.add(pm);
+                    }
                     html += '<tr>' +
-                        '<td>' + esc(o.name) + '</td>' +
+                        '<td><button class="link" onclick="openOwn(' + o.id + ')">' + esc(o.name) + '</button></td>' +
                         '<td>' + esc(o.type) + '</td>' +
                         '<td>' + o.lat + '</td>' +
                         '<td>' + o.lon + '</td>' +
                         '<td><button class="del" onclick="deleteObject(' + o.id + ')">🗑 Удалить</button></td>' +
                         '</tr>';
-                }
+                });
 
                 document.getElementById('list').innerHTML = html || '<tr><td colspan="5">Нет объектов</td></tr>';
             } catch (error) {
                 console.error('Ошибка:', error);
-                document.getElementById('list').innerHTML = '<tr><td colspan="5">База недоступна (откройте страницу через сервер: http://127.0.0.1:8000/)</td></tr>';
+                document.getElementById('list').innerHTML =
+                    '<tr><td colspan="5">База недоступна (откройте страницу через сервер: http://127.0.0.1:8000/)</td></tr>';
             }
         }
 
         async function addObjects() {
             var data = {
-                name: document.getElementById('name').value,
-                type: document.getElementById('type').value,
-                lat: parseFloat(document.getElementById('lat').value),
-                lon: parseFloat(document.getElementById('lon').value)
+                name: document.getElementById('name').value.trim(),
+                type: document.getElementById('type').value.trim(),
+                lat: parseFloat(document.getElementById('lat').value.replace(',', '.')),
+                lon: parseFloat(document.getElementById('lon').value.replace(',', '.'))
             };
 
             if (!data.name || !data.type || isNaN(data.lat) || isNaN(data.lon)) {
@@ -275,37 +414,53 @@
             }
 
             try {
-                await fetch('/api/objects/', {
+                await api('/api/objects/', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(data)
                 });
 
-                document.getElementById('name').value = '';
-                document.getElementById('type').value = '';
-                document.getElementById('lat').value = '';
-                document.getElementById('lon').value = '';
-
+                ['name', 'type', 'lat', 'lon'].forEach(function (id) { document.getElementById(id).value = ''; });
                 alert('✅ Объект добавлен!');
                 loadData();
             } catch (error) {
-                alert('❌ Ошибка при добавлении');
+                alert('❌ ' + error.message);
             }
         }
 
         async function deleteObject(id) {
-            if (confirm('Удалить объект?')) {
-                try {
-                    await fetch('/api/objects/' + id, { method: 'DELETE' });
-                    loadData();
-                } catch (error) {
-                    alert('❌ Ошибка при удалении');
-                }
+            if (!confirm('Удалить объект?')) return;
+            try {
+                await api('/api/objects/' + id, { method: 'DELETE' });
+                closeCard();
+                loadData();
+            } catch (error) {
+                alert('❌ ' + error.message);
             }
         }
 
-        loadData();
-        loadOsm();
+        // ================= Запуск =================
+        ymaps.ready(function () {
+            map = new ymaps.Map('map', {
+                center: [55.75, 37.62],   // [широта, долгота]
+                zoom: 14,
+                controls: ['zoomControl', 'typeSelector', 'fullscreenControl']
+            });
+            osmLayer = new ymaps.GeoObjectCollection();
+            markers = new ymaps.GeoObjectCollection();
+            map.geoObjects.add(osmLayer);
+            map.geoObjects.add(markers);
+            mapReady = true;
+
+            // Автообновление при сдвиге/масштабировании карты
+            map.events.add('boundschange', function () {
+                clearTimeout(osmTimer);
+                osmTimer = setTimeout(loadOsm, 700);
+            });
+
+            loadData();
+            loadOsm();
+        });
     </script>
 </body>
 
